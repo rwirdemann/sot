@@ -2,44 +2,117 @@ package main
 
 import (
 	"fmt"
+	"github.com/charmbracelet/bubbles/list"
 	"github.com/charmbracelet/bubbles/textarea"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/term"
-	"github.com/rwirdemann/sot"
+	"io"
+	"log"
 	"os"
-
-	tea "github.com/charmbracelet/bubbletea"
+	"sort"
+	"strings"
+	"time"
 )
+
+var ColorFocus = lipgloss.Color("12")
 
 const (
 	focusSidePanel = iota
 	focusMainPanel = iota
-	modeView
 	modeEdit
 )
 
+var (
+	itemStyle         = lipgloss.NewStyle().PaddingLeft(2)
+	selectedItemStyle = lipgloss.NewStyle().PaddingLeft(0).Foreground(lipgloss.Color("170"))
+	paginationStyle   = list.DefaultStyles().PaginationStyle.PaddingLeft(2)
+)
+
+type file struct {
+	name    string
+	title   string
+	content string
+}
+
+func (f file) FilterValue() string {
+	return ""
+}
+
+type itemDelegate struct{}
+
+func (d itemDelegate) Height() int                             { return 1 }
+func (d itemDelegate) Spacing() int                            { return 0 }
+func (d itemDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd { return nil }
+func (d itemDelegate) Render(w io.Writer, m list.Model, index int, listItem list.Item) {
+	i, ok := listItem.(file)
+	if !ok {
+		return
+	}
+
+	str := i.title
+
+	fn := itemStyle.Render
+	if index == m.Index() {
+		fn = func(s ...string) string {
+			return selectedItemStyle.Render("> " + strings.Join(s, " "))
+		}
+	}
+
+	fmt.Fprint(w, fn(str))
+}
+
 type model struct {
-	sidePanel sot.SidePanel
-	focus     int
-	mode      int
-	content   map[string]string
-	textarea  textarea.Model
-	current   string
+	focus    int
+	mode     int
+	files    []file
+	cursor   int
+	textarea textarea.Model
+	list     list.Model
 }
 
 func initialModel() model {
-	content := make(map[string]string)
-	content["Journal"] = "Mit dem Hunde spazieren gehen\nUni-Kurse evaluieren"
-	content["Dissertation"] = "Uni-Kurse evaluieren"
-	content["Softwaredesign"] = "Deep Modules with small interfaces"
+	const defaultWidth = 20
+	const listHeight = 14
+
+	l := list.New(loadJournal(), itemDelegate{}, defaultWidth, listHeight)
+	l.SetShowTitle(false)
+	l.SetShowStatusBar(false)
+	l.SetFilteringEnabled(false)
+	l.SetShowHelp(false)
+	l.Styles.PaginationStyle = paginationStyle
 
 	ti := textarea.New()
+	ti.SetWidth(80)
 	return model{
-		sidePanel: sot.NewSidePanel(),
-		focus:     focusSidePanel,
-		content:   content,
-		textarea:  ti,
+		focus:    focusSidePanel,
+		textarea: ti,
+		list:     l,
 	}
+}
+
+func loadJournal() []list.Item {
+	files, err := os.ReadDir("/Users/ralfwirdemann/Library/Mobile Documents/iCloud~com~logseq~logseq/Documents/Zettelkasten/journals")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	var ff []list.Item
+	for _, f := range files {
+		if !f.IsDir() && strings.HasSuffix(f.Name(), ".md") {
+			t, err := time.Parse(time.DateOnly, strings.ReplaceAll(strings.TrimSuffix(f.Name(), ".md"), "_", "-"))
+			if err != nil {
+				log.Fatal(err)
+			}
+			title := t.Format("Mon, 02 Jan 2006")
+			ff = append(ff, file{title: title})
+		}
+	}
+
+	sort.Slice(ff, func(i, j int) bool {
+		return ff[i].(file).title < ff[j].(file).title
+	})
+	return ff
 }
 
 func (m model) Init() tea.Cmd {
@@ -56,57 +129,45 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "enter":
-			if m.focus == focusSidePanel {
-				m.focus = focusMainPanel
-				m.mode = modeEdit
-				m.textarea.SetValue(m.content[m.sidePanel.Selected])
-				cmds = append(cmds, m.textarea.Focus())
-			}
-
-			if m.focus == focusMainPanel && m.mode == modeView {
-				m.mode = modeEdit
-				m.textarea.SetValue(m.content[m.sidePanel.Selected])
-				cmds = append(cmds, m.textarea.Focus())
-			}
-		case "esc":
-			if m.focus == focusMainPanel {
-				m.mode = modeView
-				m.content[m.sidePanel.Selected] = m.textarea.Value()
-			}
 		case "ctrl+c", "q":
 			return m, tea.Quit
 		}
-		if m.focus == focusMainPanel {
-			switch msg.String() {
-			case "s":
-				if m.mode == modeView {
-					m.focus = focusSidePanel
-				}
-			}
-		}
-		if m.focus == focusSidePanel {
-			m.sidePanel, cmd = m.sidePanel.Update(msg)
-			if len(m.sidePanel.Selected) > 0 {
-				m.current = m.content[m.sidePanel.Selected]
-			}
-			cmds = append(cmds, cmd)
-		}
 	}
-	m.textarea, cmd = m.textarea.Update(msg)
+	m.list, cmd = m.list.Update(msg)
 	cmds = append(cmds, cmd)
 	return m, tea.Batch(cmds...)
 }
 
 func (m model) View() string {
 	return lipgloss.JoinHorizontal(lipgloss.Top,
-		m.sidePanel.Render(m.focus == focusSidePanel),
+		m.renderFilePanel(),
 		m.renderMainPanel())
 }
 
 func mainPanelSize() (int, int) {
 	w, h, _ := term.GetSize(os.Stdout.Fd())
-	return int(float32(w)*0.75) - 2, h - 2
+	return int(float32(w)*0.82) - 2, h - 2
+}
+
+func filePanelSize() (int, int) {
+	w, h, _ := term.GetSize(os.Stdout.Fd())
+	return int(float32(w)*0.18) - 2, h - 2
+}
+
+func (m model) renderFilePanel() string {
+	w, h := filePanelSize()
+	var style = lipgloss.NewStyle().
+		Width(w).
+		Height(h).
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(lipgloss.Color("240"))
+
+	if m.focus == focusSidePanel {
+		style = style.BorderForeground(ColorFocus)
+	}
+	m.list.SetHeight(h)
+
+	return style.Render(m.list.View())
 }
 
 func (m model) renderMainPanel() string {
@@ -116,18 +177,21 @@ func (m model) renderMainPanel() string {
 		Height(h).
 		BorderStyle(lipgloss.NormalBorder())
 	if m.focus == focusMainPanel {
-		style = style.BorderForeground(sot.ColorFocus)
-		if m.mode == modeEdit {
-			return style.Render(m.textarea.View())
-		}
+		style = style.BorderForeground(ColorFocus)
 	}
-	return style.Render(m.content[m.sidePanel.Selected])
+
+	s := ""
+	if m.mode == modeEdit {
+		s = m.textarea.View() + "\n"
+	}
+
+	return style.Render(s)
 }
 
 func main() {
 	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
-		fmt.Printf("Alas, there's been an error: %v", err)
+		fmt.Printf("Alas, there's been an errorq: %v", err)
 		os.Exit(1)
 	}
 }
