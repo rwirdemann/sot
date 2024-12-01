@@ -9,7 +9,9 @@ import (
 	"github.com/charmbracelet/x/term"
 	"io"
 	"log"
+	"log/slog"
 	"os"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -20,7 +22,6 @@ var ColorFocus = lipgloss.Color("12")
 const (
 	focusSidePanel = iota
 	focusMainPanel = iota
-	modeEdit
 )
 
 var (
@@ -35,7 +36,9 @@ type file struct {
 	content string
 }
 
-func (f file) FilterValue() string {
+type item string
+
+func (i item) FilterValue() string {
 	return ""
 }
 
@@ -45,12 +48,10 @@ func (d itemDelegate) Height() int                             { return 1 }
 func (d itemDelegate) Spacing() int                            { return 0 }
 func (d itemDelegate) Update(_ tea.Msg, _ *list.Model) tea.Cmd { return nil }
 func (d itemDelegate) Render(w io.Writer, m list.Model, index int, listItem list.Item) {
-	i, ok := listItem.(file)
+	i, ok := listItem.(item)
 	if !ok {
 		return
 	}
-
-	str := i.title
 
 	fn := itemStyle.Render
 	if index == m.Index() {
@@ -59,23 +60,31 @@ func (d itemDelegate) Render(w io.Writer, m list.Model, index int, listItem list
 		}
 	}
 
-	fmt.Fprint(w, fn(str))
+	_, err := fmt.Fprint(w, fn(fmt.Sprintf("%s", i)))
+	if err != nil {
+		slog.Error(err.Error())
+	}
 }
 
 type model struct {
 	focus    int
 	mode     int
-	files    []file
 	cursor   int
 	textarea textarea.Model
 	list     list.Model
+	files    []file
 }
 
 func initialModel() model {
 	const defaultWidth = 20
 	const listHeight = 14
 
-	l := list.New(loadJournal(), itemDelegate{}, defaultWidth, listHeight)
+	files := loadJournal()
+	items := make([]list.Item, 0, len(files))
+	for _, f := range files {
+		items = append(items, item(f.title))
+	}
+	l := list.New(items, itemDelegate{}, defaultWidth, listHeight)
 	l.SetShowTitle(false)
 	l.SetShowStatusBar(false)
 	l.SetFilteringEnabled(false)
@@ -88,29 +97,39 @@ func initialModel() model {
 		focus:    focusSidePanel,
 		textarea: ti,
 		list:     l,
+		files:    files,
 	}
 }
 
-func loadJournal() []list.Item {
-	files, err := os.ReadDir("/Users/ralfwirdemann/Library/Mobile Documents/iCloud~com~logseq~logseq/Documents/Zettelkasten/journals")
+func loadJournal() []file {
+	const base = "/Users/ralfwirdemann/Library/Mobile Documents/iCloud~com~logseq~logseq/Documents/Zettelkasten/journals"
+	files, err := os.ReadDir(base)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	var ff []list.Item
+	var ff []file
 	for _, f := range files {
 		if !f.IsDir() && strings.HasSuffix(f.Name(), ".md") {
 			t, err := time.Parse(time.DateOnly, strings.ReplaceAll(strings.TrimSuffix(f.Name(), ".md"), "_", "-"))
 			if err != nil {
 				log.Fatal(err)
 			}
+			content, err := os.ReadFile(path.Join(base, f.Name()))
+			if err != nil {
+				log.Fatal(err)
+			}
 			title := t.Format("Mon, 02 Jan 2006")
-			ff = append(ff, file{title: title})
+			ff = append(ff, file{
+				name:    f.Name(),
+				title:   title,
+				content: string(content),
+			})
 		}
 	}
 
 	sort.Slice(ff, func(i, j int) bool {
-		return ff[i].(file).title < ff[j].(file).title
+		return ff[i].name > ff[j].name
 	})
 	return ff
 }
@@ -180,11 +199,11 @@ func (m model) renderMainPanel() string {
 		style = style.BorderForeground(ColorFocus)
 	}
 
-	s := ""
-	if m.mode == modeEdit {
-		s = m.textarea.View() + "\n"
+	if len(m.files) == 0 {
+		return style.Render("this is where the file content is shown")
 	}
 
+	s := m.files[m.list.Cursor()].content
 	return style.Render(s)
 }
 
