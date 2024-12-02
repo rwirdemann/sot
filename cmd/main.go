@@ -22,6 +22,8 @@ var ColorFocus = lipgloss.Color("12")
 const (
 	focusSidePanel = iota
 	focusMainPanel = iota
+	modeView
+	modeEdit
 )
 
 var (
@@ -91,13 +93,12 @@ func initialModel() model {
 	l.SetShowHelp(false)
 	l.Styles.PaginationStyle = paginationStyle
 
-	ti := textarea.New()
-	ti.SetWidth(80)
 	return model{
 		focus:    focusSidePanel,
-		textarea: ti,
+		textarea: textarea.New(),
 		list:     l,
 		files:    files,
+		mode:     modeView,
 	}
 }
 
@@ -150,10 +151,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
+		case "enter":
+			if m.mode == modeView {
+				m.mode = modeEdit
+				m.focus = focusMainPanel
+				m.textarea.SetValue(m.files[m.list.Cursor()].content)
+				cmds = append(cmds, m.textarea.Focus())
+			}
+		case "esc":
+			if m.mode == modeEdit {
+				m.mode = modeView
+				m.files[m.list.Cursor()].content = m.textarea.Value()
+			}
 		}
 	}
-	m.list, cmd = m.list.Update(msg)
-	cmds = append(cmds, cmd)
+
+	if m.focus == focusMainPanel {
+		m.textarea, cmd = m.textarea.Update(msg)
+		cmds = append(cmds, cmd)
+	}
+
+	if m.focus == focusSidePanel {
+		m.list, cmd = m.list.Update(msg)
+		cmds = append(cmds, cmd)
+	}
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -203,8 +225,12 @@ func (m model) renderMainPanel() string {
 		return style.Render("this is where the file content is shown")
 	}
 
-	s := m.files[m.list.Cursor()].content
-	return style.Render(s)
+	if m.mode == modeEdit {
+		m.textarea.SetWidth(w)
+		m.textarea.SetHeight(h)
+		return style.Render(m.textarea.View())
+	}
+	return style.Render(m.files[m.list.Cursor()].content)
 }
 
 func main() {
